@@ -127,6 +127,7 @@ model Donation {
   amountCents Int
   currency    String   @default("usd")
   source      String   // "booking" | "direct"
+  stripeCheckoutId String? @unique // set for direct Stripe donations; makes webhook idempotent
   createdAt   DateTime @default(now())
 }
 
