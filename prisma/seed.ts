@@ -921,6 +921,7 @@ async function main() {
         bio: u.bio ?? null,
         avatarUrl: avatarUrl(u.key),
         createdAt: addDays(TODAY, -accountAgeDays(i)),
+        emailVerifiedAt: addDays(TODAY, -accountAgeDays(i)), // demo accounts count as verified
       },
     });
     users[u.key] = { id: created.id, name: created.name };
