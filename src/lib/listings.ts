@@ -1,6 +1,7 @@
 import "server-only";
 import type { Prisma } from "@prisma/client";
 import { db } from "./db";
+import { categoryBySlug } from "./categories";
 
 /** Bookings that hold dates: confirmed ones, plus checkouts started in the last 30 minutes. */
 export function blockingBookingWhere(checkIn: Date, checkOut: Date): Prisma.BookingWhereInput {
@@ -35,8 +36,8 @@ export function todayUTC() {
   return new Date(Date.UTC(n.getUTCFullYear(), n.getUTCMonth(), n.getUTCDate()));
 }
 
-export async function searchListings(opts: { q?: string; checkIn?: Date | null; checkOut?: Date | null; guests?: number }) {
-  const where: Prisma.ListingWhereInput = { published: true };
+export async function searchListings(opts: { q?: string; checkIn?: Date | null; checkOut?: Date | null; guests?: number; category?: string }) {
+  const where: Prisma.ListingWhereInput = { published: true, ...(categoryBySlug(opts.category)?.where ?? {}) };
   if (opts.q) {
     const q = opts.q.trim();
     where.OR = [
@@ -52,7 +53,7 @@ export async function searchListings(opts: { q?: string; checkIn?: Date | null; 
   }
   const listings = await db.listing.findMany({
     where,
-    include: { photos: { orderBy: { position: "asc" }, take: 1 }, reviews: { select: { rating: true } } },
+    include: { photos: { orderBy: { position: "asc" }, take: 5 }, reviews: { select: { rating: true } }, host: { select: { name: true } } },
     orderBy: { createdAt: "desc" },
     take: 60,
   });
