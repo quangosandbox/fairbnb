@@ -5,7 +5,7 @@ export function PriceBreakdown({ price, currency = "usd", taxRateBps }: { price:
   const row = (label: React.ReactNode, value: string, hint?: string) => (
     <div className="flex justify-between gap-4 py-1">
       <div>
-        <span>{label}</span>
+        <span className="underline decoration-neutral-400 underline-offset-2">{label}</span>
         {hint && <p className="text-xs text-neutral-500">{hint}</p>}
       </div>
       <span className="shrink-0">{value}</span>
