@@ -1,0 +1,189 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url       = env("DATABASE_URL") // pooled connection, used by the app
+  directUrl = env("DATABASE_URL_UNPOOLED") // direct connection, used by migrations
+}
+
+// One account can both host and travel.
+model User {
+  id              String    @id @default(cuid())
+  email           String    @unique
+  name            String
+  passwordHash    String
+  bio             String?
+  avatarUrl       String?
+  // Stripe Connect (Standard) account for hosts. Null until onboarding starts.
+  stripeAccountId String?   @unique
+  payoutsEnabled  Boolean   @default(false)
+  emailVerifiedAt DateTime?
+  // Bumped on password reset / "log out everywhere"; sessions carrying an older value are rejected.
+  sessionVersion  Int       @default(0)
+  createdAt       DateTime  @default(now())
+  listings        Listing[]
+  bookings        Booking[]
+  reviews         Review[]
+  donations       Donation[]
+  favorites       Favorite[]
+  authTokens      AuthToken[]
+}
+
+model Listing {
+  id               String         @id @default(cuid())
+  hostId           String
+  host             User           @relation(fields: [hostId], references: [id], onDelete: Cascade)
+  title            String
+  description      String
+  propertyType     String         // "Entire home", "Private room", ...
+  city             String
+  region           String         // state / province
+  country          String
+  latitude         Float?
+  longitude        Float?
+  maxGuests        Int
+  bedrooms         Int
+  beds             Int
+  bathrooms        Float
+  amenities        String[]
+  // All money is stored in integer cents.
+  nightlyPriceCents Int
+  cleaningFeeCents  Int           @default(0)
+  // Lodging/occupancy tax the host is required to collect, in basis points (1000 = 10%).
+  taxRateBps        Int           @default(0)
+  minNights         Int           @default(1)
+  currency          String        @default("usd")
+  published         Boolean       @default(true)
+  createdAt         DateTime      @default(now())
+  photos            ListingPhoto[]
+  bookings          Booking[]
+  reviews           Review[]
+  favorites         Favorite[]
+
+  @@index([city])
+  @@index([country])
+}
+
+model ListingPhoto {
+  id        String  @id @default(cuid())
+  listingId String
+  listing   Listing @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  url       String
+  alt       String  @default("")
+  position  Int     @default(0)
+}
+
+enum BookingStatus {
+  PENDING_PAYMENT
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+}
+
+model Booking {
+  id                String        @id @default(cuid())
+  listingId         String
+  listing           Listing       @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  guestId           String
+  guest             User          @relation(fields: [guestId], references: [id], onDelete: Cascade)
+  checkIn           DateTime      @db.Date
+  checkOut          DateTime      @db.Date
+  guests            Int
+  status            BookingStatus @default(PENDING_PAYMENT)
+  // Frozen price breakdown at time of booking (cents) — exactly what the guest saw.
+  nights            Int
+  subtotalCents     Int
+  cleaningFeeCents  Int
+  taxCents          Int
+  processingCents   Int
+  platformFeeCents  Int           @default(0) // always 0. Stored so it is auditable.
+  donationCents     Int           @default(0) // optional, guest-chosen
+  totalCents        Int
+  hostPayoutCents   Int
+  currency          String        @default("usd")
+  stripeCheckoutId  String?       @unique
+  stripePaymentIntentId String?
+  paymentMode       String        @default("mock") // "mock" | "stripe"
+  cancelledAt       DateTime?
+  cancelledBy       String?       // "guest" | "host" | "system"
+  refundCents       Int           @default(0)
+  stripeRefundId    String?
+  confirmationEmailSentAt DateTime?
+  createdAt         DateTime      @default(now())
+  review            Review?
+
+  @@index([listingId, checkIn, checkOut])
+}
+
+model Review {
+  id        String   @id @default(cuid())
+  listingId String
+  listing   Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  bookingId String?  @unique
+  booking   Booking? @relation(fields: [bookingId], references: [id])
+  rating    Int      // 1-5
+  body      String
+  createdAt DateTime @default(now())
+}
+
+// Wikipedia-style: the platform is funded by voluntary donations.
+model Donation {
+  id          String   @id @default(cuid())
+  userId      String?
+  user        User?    @relation(fields: [userId], references: [id])
+  bookingId   String?
+  amountCents Int
+  currency    String   @default("usd")
+  source      String   // "booking" | "direct"
+  stripeCheckoutId String? @unique // set for direct Stripe donations; makes webhook idempotent
+  createdAt   DateTime @default(now())
+}
+
+// Public ledger of every dollar the platform spends. Shown on /transparency.
+model Expense {
+  id          String   @id @default(cuid())
+  category    String   // hosting, payments, staff, legal, ...
+  description String
+  amountCents Int
+  currency    String   @default("usd")
+  incurredOn  DateTime @db.Date
+  createdAt   DateTime @default(now())
+}
+
+// Wishlist: a guest's saved listings.
+model Favorite {
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listingId String
+  listing   Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@id([userId, listingId])
+}
+
+// One-time tokens for email verification and password reset. Only a hash is stored.
+model AuthToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String    // "verify_email" | "reset_password"
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, type])
+}
+
+// Sliding-window rate limiting shared across all server instances.
+model RateLimitHit {
+  id        BigInt   @id @default(autoincrement())
+  key       String   // e.g. "login:ip:1.2.3.4", "login:email:a@b.com"
+  createdAt DateTime @default(now())
+
+  @@index([key, createdAt])
+}
