@@ -5,6 +5,7 @@ import { getCurrentUser } from "@/lib/auth";
 import { db } from "@/lib/db";
 import { logout } from "@/app/actions/auth";
 import { Header, MobileNav } from "@/components/Header";
+import { VerifyEmailBanner } from "@/components/VerifyEmailBanner";
 
 export const metadata: Metadata = {
   title: "Fairbnb — stays with zero platform fees",
@@ -20,6 +21,7 @@ export default async function RootLayout({ children }: { children: React.ReactNo
     <html lang="en">
       <body className="flex min-h-screen flex-col pb-16 antialiased md:pb-0">
         <Header user={user ? { name: user.name, avatarUrl: user.avatarUrl } : null} destinations={destinations} logout={logout} />
+        <VerifyEmailBanner />
         <main className="flex-1">{children}</main>
         <Footer />
         <MobileNav loggedIn={!!user} />
