@@ -14,11 +14,11 @@ export function FeeCalculator() {
   const num = (label: string, v: number, set: (n: number) => void, step = 1) => (
     <label className="block">
       <span className="label">{label}</span>
-      <input className="input" type="number" min={0} step={step} value={v} onChange={(e) => set(Math.max(0, Number(e.target.value)))} />
+      <input className="input rounded-lg py-2.5 text-base" type="number" min={0} step={step} value={v} onChange={(e) => set(Math.max(0, Number(e.target.value)))} />
     </label>
   );
   return (
-    <div className="grid gap-6 rounded-2xl border border-neutral-200 p-6 md:grid-cols-2">
+    <div className="grid gap-8 rounded-xl border border-neutral-200 p-5 shadow-sm sm:p-8 md:grid-cols-2">
       <div className="space-y-3">
         <div className="grid grid-cols-2 gap-3">
           {num("Nightly price ($)", nightly, setNightly)}
@@ -26,7 +26,7 @@ export function FeeCalculator() {
           {num("Cleaning fee ($)", cleaning, setCleaning)}
           {num("Lodging tax (%)", tax, setTax, 0.5)}
         </div>
-        <div className="mt-4 rounded-xl bg-neutral-50 p-4 text-sm">
+        <div className="mt-4 rounded-xl bg-neutral-50 p-5 text-sm">
           <p className="font-semibold">Same stay on a typical big platform*</p>
           <div className="mt-2 grid grid-cols-3 gap-2 text-center">
             <div><p className="text-xs text-neutral-500">Guest pays</p><p className="font-bold">{formatMoney(typical.guestPaysCents)}</p></div>
@@ -41,7 +41,10 @@ export function FeeCalculator() {
           <p className="mt-3 text-xs text-neutral-500">*Estimate using a ~14.2% guest service fee and 3% host fee (a common split-fee model). Actual fees elsewhere vary.</p>
         </div>
       </div>
-      <PriceBreakdown price={price} taxRateBps={tax * 100} />
+      <div className="rounded-xl border border-neutral-200 p-5">
+        <p className="mb-3 text-lg font-semibold">Price details</p>
+        <PriceBreakdown price={price} taxRateBps={tax * 100} />
+      </div>
     </div>
   );
 }
