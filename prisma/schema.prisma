@@ -19,12 +19,16 @@ model User {
   // Stripe Connect (Standard) account for hosts. Null until onboarding starts.
   stripeAccountId String?   @unique
   payoutsEnabled  Boolean   @default(false)
+  emailVerifiedAt DateTime?
+  // Bumped on password reset / "log out everywhere"; sessions carrying an older value are rejected.
+  sessionVersion  Int       @default(0)
   createdAt       DateTime  @default(now())
   listings        Listing[]
   bookings        Booking[]
   reviews         Review[]
   donations       Donation[]
   favorites       Favorite[]
+  authTokens      AuthToken[]
 }
 
 model Listing {
@@ -102,6 +106,11 @@ model Booking {
   stripeCheckoutId  String?       @unique
   stripePaymentIntentId String?
   paymentMode       String        @default("mock") // "mock" | "stripe"
+  cancelledAt       DateTime?
+  cancelledBy       String?       // "guest" | "host" | "system"
+  refundCents       Int           @default(0)
+  stripeRefundId    String?
+  confirmationEmailSentAt DateTime?
   createdAt         DateTime      @default(now())
   review            Review?
 
@@ -154,4 +163,27 @@ model Favorite {
   createdAt DateTime @default(now())
 
   @@id([userId, listingId])
+}
+
+// One-time tokens for email verification and password reset. Only a hash is stored.
+model AuthToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      String    // "verify_email" | "reset_password"
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId, type])
+}
+
+// Sliding-window rate limiting shared across all server instances.
+model RateLimitHit {
+  id        BigInt   @id @default(autoincrement())
+  key       String   // e.g. "login:ip:1.2.3.4", "login:email:a@b.com"
+  createdAt DateTime @default(now())
+
+  @@index([key, createdAt])
 }
