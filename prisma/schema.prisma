@@ -23,6 +23,7 @@ model User {
   bookings        Booking[]
   reviews         Review[]
   donations       Donation[]
+  favorites       Favorite[]
 }
 
 model Listing {
@@ -54,6 +55,7 @@ model Listing {
   photos            ListingPhoto[]
   bookings          Booking[]
   reviews           Review[]
+  favorites         Favorite[]
 
   @@index([city])
   @@index([country])
@@ -140,4 +142,15 @@ model Expense {
   currency    String   @default("usd")
   incurredOn  DateTime @db.Date
   createdAt   DateTime @default(now())
+}
+
+// Wishlist: a guest's saved listings.
+model Favorite {
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  listingId String
+  listing   Listing  @relation(fields: [listingId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@id([userId, listingId])
 }
