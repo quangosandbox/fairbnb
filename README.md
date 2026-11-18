@@ -37,9 +37,9 @@ Add Stripe test keys to exercise real Checkout + Connect onboarding (use `stripe
    pooled (host contains `-pooler`) and direct (pooling toggle off).
 2. Vercel: import this repo and set environment variables:
    - `DATABASE_URL` = pooled string
-   - `DIRECT_URL` = direct string
+   - `DATABASE_URL_UNPOOLED` = direct string (used only by migrations)
    - `SESSION_SECRET` = 32+ random characters (`openssl rand -hex 32`)
    - `NEXT_PUBLIC_APP_URL` = your site URL
    - `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` (optional; leave unset for demo mode)
 3. Deploy. The `vercel-build` script applies migrations before building.
-4. Optional demo data: `DATABASE_URL=<direct> DIRECT_URL=<direct> npm run db:seed` from your machine. This wipes the database, so never run it once real users exist.
+4. Optional demo data: `DATABASE_URL=<direct> DATABASE_URL_UNPOOLED=<direct> npm run db:seed` from your machine. This wipes the database, so never run it once real users exist.
