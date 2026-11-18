@@ -8,6 +8,7 @@ import { todayUTC } from "@/lib/listings";
 import { setUpPayouts, togglePublished } from "@/app/actions/listings";
 import { cancelBooking } from "@/app/actions/bookings";
 import { Icon } from "@/components/Icons";
+import { computeRefund } from "@/lib/cancellation";
 
 export const dynamic = "force-dynamic";
 export const metadata = { title: "Hosting — Fairbnb" };
@@ -32,10 +33,27 @@ const EMPTY: Record<TabKey, string> = {
   past: "No past reservations yet.",
 };
 
-export default async function HostPage({ searchParams }: { searchParams: Promise<{ tab?: string }> }) {
+const CANCEL_ERRORS: Record<string, string> = {
+  changed: "The refund amount changed. Please review it and confirm again.",
+  refund_failed: "Stripe couldn't process the refund, so the reservation was NOT cancelled. Check your Stripe balance and try again.",
+  missing_payment: "We couldn't find the payment for this reservation, so it wasn't cancelled. Please contact support.",
+  not_allowed: "This reservation can't be cancelled anymore.",
+};
+
+export default async function HostPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ tab?: string; cancel?: string; cancelled?: string; cancelError?: string }>;
+}) {
   const user = await getCurrentUser();
   if (!user) redirect("/login?next=/host");
-  const { tab: tabParam } = await searchParams;
+  const { tab: tabParam, cancel: cancelParam, cancelled: cancelledParam, cancelError } = await searchParams;
+  const justCancelled = cancelledParam
+    ? await db.booking.findFirst({
+        where: { id: cancelledParam, status: "CANCELLED", listing: { hostId: user.id } },
+        include: { guest: { select: { name: true } } },
+      })
+    : null;
   const [listings, bookings] = await Promise.all([
     db.listing.findMany({ where: { hostId: user.id }, include: { photos: { take: 1, orderBy: { position: "asc" } } }, orderBy: { createdAt: "desc" } }),
     db.booking.findMany({
@@ -81,6 +99,13 @@ export default async function HostPage({ searchParams }: { searchParams: Promise
           <Icon name="plus" className="h-4 w-4" /> Create listing
         </Link>
       </div>
+
+      {justCancelled && (
+        <p role="status" className="mt-6 rounded-xl bg-neutral-100 p-4 font-semibold">
+          Reservation cancelled. {justCancelled.guest.name} was refunded {formatMoney(justCancelled.refundCents, justCancelled.currency)} in full
+          {justCancelled.paymentMode === "mock" ? " (demo mode: no real money moved)" : ""}.
+        </p>
+      )}
 
       <section className="mt-10">
         <h2 className="text-2xl font-semibold">Your reservations</h2>
@@ -140,12 +165,39 @@ export default async function HostPage({ searchParams }: { searchParams: Promise
                       <p className="font-semibold">{formatMoney(b.hostPayoutCents, b.currency)}</p>
                     </div>
                   </div>
-                  {b.status === "CONFIRMED" && b.checkIn > new Date() && (
-                    <form action={cancelBooking} className="mt-3 text-right">
-                      <input type="hidden" name="bookingId" value={b.id} />
-                      <button className="text-xs font-semibold text-red-700 underline-offset-2 hover:underline">Cancel reservation</button>
-                    </form>
-                  )}
+                  {(() => {
+                    if (b.status !== "CONFIRMED") return null;
+                    const q = computeRefund(b, "host", new Date());
+                    if (!q.allowed) return null;
+                    if (cancelParam !== b.id) {
+                      return (
+                        <Link href={`/host?tab=${tab}&cancel=${b.id}#cancel-${b.id}`} scroll={false} className="mt-3 self-end text-xs font-semibold text-red-700 underline-offset-2 hover:underline">
+                          Cancel reservation
+                        </Link>
+                      );
+                    }
+                    return (
+                      <div id={`cancel-${b.id}`} className="mt-3 rounded-lg border border-red-200 bg-red-50/40 p-3 text-sm" data-testid="host-cancel-confirm">
+                        {cancelError && <p role="alert" className="mb-2 font-semibold text-red-800">{CANCEL_ERRORS[cancelError] ?? CANCEL_ERRORS.not_allowed}</p>}
+                        <p className="font-semibold">Cancel {b.guest.name.split(" ")[0]}&apos;s reservation?</p>
+                        <p className="mt-1 text-neutral-700">
+                          The guest gets a <strong>full refund of <span data-testid="host-refund-amount">{formatMoney(q.refundCents, b.currency)}</span></strong>, including{" "}
+                          {formatMoney(b.processingCents, b.currency)} card processing that Stripe doesn&apos;t return to you. The refund comes out of your
+                          Stripe balance.
+                        </p>
+                        <div className="mt-3 flex items-center justify-end gap-3">
+                          <Link href={`/host?tab=${tab}`} scroll={false} className="text-xs font-semibold underline-offset-2 hover:underline">Keep it</Link>
+                          <form action={cancelBooking}>
+                            <input type="hidden" name="bookingId" value={b.id} />
+                            <input type="hidden" name="expectedRefundCents" value={q.refundCents} />
+                            <button className="rounded-lg bg-red-700 px-3 py-1.5 text-xs font-semibold text-white hover:bg-red-800">
+                              Cancel and refund {formatMoney(q.refundCents, b.currency)}
+                            </button>
+                          </form>
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
               );
             })}

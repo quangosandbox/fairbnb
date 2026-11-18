@@ -3,6 +3,7 @@ import Stripe from "stripe";
 import { db } from "@/lib/db";
 import { appUrl } from "@/lib/payments";
 import { formatMoney } from "@/lib/pricing";
+import { sendBookingCancelledEmails, sendBookingConfirmedEmails } from "@/lib/booking-emails";
 
 /**
  * Real Stripe path.
@@ -236,6 +237,102 @@ export async function startStripeCheckout(bookingId: string): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
+// Refunds (on the host's connected account — direct charges)
+// ---------------------------------------------------------------------------
+
+export type RefundRequest = {
+  bookingId: string;
+  paymentIntentId: string;
+  /** Host's connected account (the charge lives there). */
+  stripeAccount: string;
+  amountCents: number;
+  /** The charge total and what was already refunded, to tell full from partial refunds. */
+  totalCents: number;
+  alreadyRefundedCents?: number;
+  /** Donation (= application fee) on the charge, and whether it is part of this refund. */
+  donationCents: number;
+  donationRefunded: boolean;
+  /** Who/what triggered it, recorded in Stripe metadata. */
+  cancelledBy: string;
+  /** Defaults to `refund-<bookingId>`. Same key + same params = same refund on retry / double-submit. */
+  idempotencyKey?: string;
+};
+
+export type RefundResult = { refundId: string; status: string | null; applicationFeeRefunded: boolean };
+
+/**
+ * Refunds a booking payment on the host's account.
+ *
+ * Direct charges: the refund comes out of the host's Stripe balance. Fairbnb's
+ * only cut is the donation (the application fee); when the donation is refunded
+ * the platform must hand that fee back to the host, or the host would pay the
+ * guest's donation out of pocket.
+ *  - Full refund: `refund_application_fee: true` returns the whole fee.
+ *  - Partial refund: Stripe would return the fee only *proportionally*, so instead
+ *    we refund the exact donation amount via an application-fee refund.
+ *
+ * Exported with an injectable client for tests.
+ */
+export async function refundBookingPayment(req: RefundRequest, client: Stripe = stripe()): Promise<RefundResult | null> {
+  if (!Number.isInteger(req.amountCents) || req.amountCents < 0) throw new Error("Refund must be a non-negative integer (cents)");
+  if (req.amountCents === 0) return null;
+  const remaining = req.totalCents - (req.alreadyRefundedCents ?? 0);
+  if (req.amountCents > remaining) throw new Error(`Refund ${req.amountCents} exceeds refundable ${remaining}`);
+  const isFull = req.amountCents === remaining && (req.alreadyRefundedCents ?? 0) === 0;
+  const withFee = req.donationRefunded && req.donationCents > 0;
+  const key = req.idempotencyKey ?? `refund-${req.bookingId}`;
+
+  const refund = await client.refunds.create(
+    {
+      payment_intent: req.paymentIntentId,
+      amount: req.amountCents,
+      reason: "requested_by_customer",
+      ...(withFee && isFull ? { refund_application_fee: true } : {}),
+      metadata: { bookingId: req.bookingId, source: "fairbnb", cancelledBy: req.cancelledBy },
+    },
+    { stripeAccount: req.stripeAccount, idempotencyKey: key },
+  );
+
+  let applicationFeeRefunded = withFee && isFull;
+  if (withFee && !isFull) {
+    // Find the application fee on the charge, then refund exactly the donation from the platform.
+    try {
+      const pi = await client.paymentIntents.retrieve(
+        req.paymentIntentId,
+        { expand: ["latest_charge"] },
+        { stripeAccount: req.stripeAccount },
+      );
+      const charge = pi.latest_charge;
+      const fee = charge && typeof charge !== "string" ? charge.application_fee : null;
+      const feeId = typeof fee === "string" ? fee : (fee?.id ?? null);
+      if (!feeId) throw new Error("charge has no application fee");
+      await client.applicationFees.createRefund(
+        feeId,
+        { amount: req.donationCents, metadata: { bookingId: req.bookingId } },
+        { idempotencyKey: `${key}-fee` },
+      );
+      applicationFeeRefunded = true;
+    } catch (e) {
+      // The guest is refunded either way; this only affects who funds the donation refund.
+      console.error(
+        `[stripe] ACTION NEEDED: refunded booking ${req.bookingId} but could not return the ${req.donationCents}c donation fee to ${req.stripeAccount}`,
+        e,
+      );
+    }
+  }
+  return { refundId: refund.id, status: refund.status, applicationFeeRefunded };
+}
+
+/** Best-effort: stop an open Checkout Session from being paid after the booking is cancelled. */
+export async function expireCheckoutSession(sessionId: string, stripeAccount: string): Promise<void> {
+  try {
+    await stripe().checkout.sessions.expire(sessionId, {}, { stripeAccount });
+  } catch {
+    // Already expired / completed. If it was paid, the webhook auto-refunds.
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Direct donations (platform account)
 // ---------------------------------------------------------------------------
 
@@ -305,12 +402,32 @@ export async function handleStripeEvent(event: Stripe.Event): Promise<void> {
       // session may have replaced it.
       await db.booking.updateMany({
         where: { id: bookingId, status: "PENDING_PAYMENT", stripeCheckoutId: session.id },
-        data: { status: "CANCELLED" },
+        data: { status: "CANCELLED", cancelledAt: new Date(), cancelledBy: "system" },
       });
       return;
     }
     case "account.updated": {
       await applyAccountStatus(event.data.object);
+      return;
+    }
+    case "charge.refunded": {
+      if (!event.account) return;
+      await syncChargeRefunds(event.data.object, event.account);
+      return;
+    }
+    case "refund.created":
+    case "refund.updated":
+    case "refund.failed":
+    case "charge.refund.updated": {
+      if (!event.account) return;
+      const refund = event.data.object;
+      if (refund.status === "failed" || refund.status === "canceled") {
+        console.error(`[stripe] ACTION NEEDED: refund ${refund.id} on ${event.account} is ${refund.status}`, refund.failure_reason);
+      }
+      const chargeId = typeof refund.charge === "string" ? refund.charge : refund.charge?.id;
+      if (!chargeId) return;
+      const charge = await stripe().charges.retrieve(chargeId, {}, { stripeAccount: event.account });
+      await syncChargeRefunds(charge, event.account);
       return;
     }
     default:
@@ -323,7 +440,8 @@ async function confirmBookingPaid(session: Stripe.Checkout.Session, accountId: s
   const paymentIntentId =
     typeof session.payment_intent === "string" ? session.payment_intent : (session.payment_intent?.id ?? null);
 
-  await db.$transaction(async (tx) => {
+  type Outcome = { kind: "confirmed" } | { kind: "duplicate" } | { kind: "orphan"; totalCents: number; donationCents: number; cancelled: boolean };
+  const outcome: Outcome = await db.$transaction(async (tx): Promise<Outcome> => {
     const booking = await tx.booking.findUnique({
       where: { id: bookingId },
       include: { listing: { include: { host: { select: { stripeAccountId: true } } } } },
@@ -348,13 +466,18 @@ async function confirmBookingPaid(session: Stripe.Checkout.Session, accountId: s
       },
     });
     if (count === 0) {
-      if (booking.status === "CONFIRMED" || booking.status === "COMPLETED") return; // duplicate delivery
-      // Paid for a booking that was already cancelled (e.g. expired, or the
-      // dates were released). Money is in the host's account: needs a refund.
-      console.error(
-        `[stripe] Booking ${bookingId} was paid (PI ${paymentIntentId}, account ${accountId}) but is ${booking.status}; refund required`,
-      );
-      return;
+      // Duplicate delivery of the payment we already recorded (the booking may
+      // since have been confirmed, completed, or cancelled+refunded normally).
+      if (!paymentIntentId || booking.stripePaymentIntentId === paymentIntentId) return { kind: "duplicate" };
+      // A payment we never recorded: it arrived after the booking was cancelled
+      // (expired / released dates), or it's a second payment for a confirmed
+      // booking. Either way the money is in the host's account: refund it in full.
+      return {
+        kind: "orphan",
+        totalCents: session.amount_total ?? booking.totalCents,
+        donationCents: booking.donationCents,
+        cancelled: booking.status === "CANCELLED",
+      };
     }
     if (booking.donationCents > 0) {
       await tx.donation.create({
@@ -367,7 +490,91 @@ async function confirmBookingPaid(session: Stripe.Checkout.Session, accountId: s
         },
       });
     }
+    return { kind: "confirmed" };
   });
+
+  if (outcome.kind === "confirmed") {
+    await sendBookingConfirmedEmails(bookingId);
+    return;
+  }
+  if (outcome.kind === "orphan") {
+    await refundOrphanPayment(bookingId, paymentIntentId!, accountId, outcome);
+  }
+}
+
+/**
+ * Full, idempotent refund of a payment that doesn't belong to a live booking.
+ * Throws on failure so the webhook returns 500 and Stripe retries (same
+ * idempotency key, so a retry never refunds twice).
+ */
+async function refundOrphanPayment(
+  bookingId: string,
+  paymentIntentId: string,
+  accountId: string,
+  o: { totalCents: number; donationCents: number; cancelled: boolean },
+) {
+  const result = await refundBookingPayment({
+    bookingId,
+    paymentIntentId,
+    stripeAccount: accountId,
+    amountCents: o.totalCents,
+    totalCents: o.totalCents,
+    donationCents: o.donationCents,
+    donationRefunded: o.donationCents > 0,
+    cancelledBy: "system",
+    idempotencyKey: `refund-${bookingId}-${paymentIntentId}`,
+  });
+  console.warn(`[stripe] Auto-refunded late/duplicate payment ${paymentIntentId} for booking ${bookingId} (${result?.refundId})`);
+  if (!o.cancelled || !result) return; // second payment on a confirmed booking: booking itself is unchanged
+  const { count } = await db.booking.updateMany({
+    where: { id: bookingId, status: "CANCELLED", stripeRefundId: null },
+    data: {
+      stripePaymentIntentId: paymentIntentId,
+      stripeRefundId: result.refundId,
+      refundCents: o.totalCents,
+      paymentMode: "stripe",
+    },
+  });
+  if (count === 1) await sendBookingCancelledEmails(bookingId);
+}
+
+/**
+ * Mirrors a charge's refund state onto its booking. Covers refunds made outside
+ * Fairbnb (e.g. from the host's Stripe dashboard): refundCents always tracks
+ * charge.amount_refunded, and a full refund we didn't initiate cancels the booking.
+ */
+export async function syncChargeRefunds(charge: Stripe.Charge, accountId: string): Promise<void> {
+  const pi = typeof charge.payment_intent === "string" ? charge.payment_intent : charge.payment_intent?.id;
+  if (!pi) return;
+  const booking = await db.booking.findFirst({
+    where: { stripePaymentIntentId: pi, listing: { host: { stripeAccountId: accountId } } },
+  });
+  if (!booking) return;
+
+  await db.booking.update({ where: { id: booking.id }, data: { refundCents: charge.amount_refunded } });
+
+  if (!charge.refunded || booking.status !== "CONFIRMED") return;
+  // Fully refunded while still CONFIRMED. If Fairbnb issued the refund, the
+  // cancel flow is finishing up and owns the status change; don't race it.
+  const refunds = await stripe().refunds.list({ payment_intent: pi, limit: 20 }, { stripeAccount: accountId });
+  if (refunds.data.some((r) => r.metadata?.source === "fairbnb")) return;
+
+  const { count } = await db.booking.updateMany({
+    where: { id: booking.id, status: "CONFIRMED" },
+    data: { status: "CANCELLED", cancelledAt: new Date(), cancelledBy: "host", refundCents: charge.amount_refunded },
+  });
+  if (count === 0) return;
+  // Only drop the donation from the ledger if the platform actually gave it back.
+  if (booking.donationCents > 0 && charge.application_fee) {
+    const feeId = typeof charge.application_fee === "string" ? charge.application_fee : charge.application_fee.id;
+    try {
+      const fee = await stripe().applicationFees.retrieve(feeId);
+      if (fee.amount_refunded >= booking.donationCents) await db.donation.deleteMany({ where: { bookingId: booking.id } });
+    } catch (e) {
+      console.error(`[stripe] could not check application fee ${feeId} for booking ${booking.id}`, e);
+    }
+  }
+  await sendBookingCancelledEmails(booking.id);
 }
 
 async function recordDirectDonation(session: Stripe.Checkout.Session) {

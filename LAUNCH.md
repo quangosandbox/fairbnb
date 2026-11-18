@@ -34,12 +34,13 @@ plus a second endpoint (or the same one) for platform events (donations).
 ## 3. Trust & safety (the real cost of a marketplace)
 - Identity verification for hosts (Stripe Identity, ~$1.50/check) and maybe guests.
 - Listing review / fraud detection (fake listings are the #1 scam).
-- Dispute handling & cancellation policy. Right now: direct charges mean refunds come out of the host's Stripe balance,
-  and there's no escrow-until-check-in. Decide a cancellation policy and automate refunds.
+- Dispute handling. Cancellations and refunds are automated (see "Cancellations & refunds" below), but there's no
+  escrow-until-check-in: direct charges mean refunds come out of the host's Stripe balance, so a host who has already
+  paid out could have a negative balance (Stripe then debits their bank account).
 - A human support channel. Budget for this; it's where most of the money goes at scale.
 
 ## 4. Not built yet (engineering roadmap)
-- [ ] Automated refunds on cancellation (Stripe refunds on connected account)
+- [x] Automated refunds on cancellation (Stripe refunds on connected account), see "Cancellations & refunds"
 - [ ] Email notifications + password reset
 - [ ] Photo uploads
 - [ ] Host calendar / blocked dates, per-night pricing
@@ -48,3 +49,33 @@ plus a second endpoint (or the same one) for platform events (donations).
 - [ ] Host identity verification
 - [ ] Admin tools: moderation, expense ledger entry
 - [ ] Multi-currency (pricing assumes US Stripe rates)
+
+## Cancellations & refunds
+Policy ("Flexible", shown to guests on the trip page and in the confirmation email; code: `src/lib/cancellation.ts`):
+
+| Who cancels / when | Guest gets back | Not refunded |
+|---|---|---|
+| Guest, 24 h or more before check-in (check-in = 3:00 PM UTC) | Nights + cleaning + tax + donation | Card processing (Stripe keeps its fee on refunds; neither host nor Fairbnb gets it) |
+| Guest, less than 24 h before check-in | Every night except the first + cleaning + tax + donation | First night, card processing |
+| Guest, after check-in | Can't cancel online; contact the host | |
+| Host, any time before checkout | **Everything**, card processing included (the host absorbs Stripe's fee) | Nothing |
+| Unpaid (awaiting payment) | Nothing was charged | |
+
+How it works:
+- `cancelBooking` server action → `cancelAndRefund` (`src/lib/payments.ts`). The guest/host sees the exact refund before
+  confirming; if the amount changed in the meantime (e.g. the 24 h mark passed) nothing happens and they're asked to review.
+- Stripe mode: `refunds.create` on the host's connected account with idempotency key `refund-<bookingId>`. Full refunds set
+  `refund_application_fee: true`; partial refunds return exactly the donation via an application-fee refund (Stripe would
+  otherwise return the fee only proportionally). If the refund fails, the booking stays confirmed and the user sees an error.
+- The booking is marked `CANCELLED` with a conditional update (double-submit safe), `refundCents`/`stripeRefundId` recorded,
+  the booking's `Donation` row deleted (so /transparency only counts donations we kept), and both parties are emailed.
+- Webhooks (enable on the Connect endpoint): `charge.refunded`, `refund.created`, `refund.updated`, `refund.failed` keep
+  `refundCents` in sync with Stripe (including refunds a host makes from their own Stripe dashboard; a full dashboard refund
+  cancels the booking). A payment that arrives for an already-cancelled booking is refunded in full automatically.
+- Abandoned checkouts: `GET /api/cron/expire-pending` cancels `PENDING_PAYMENT` bookings older than 45 minutes. Set
+  `CRON_SECRET` in Vercel (Vercel Cron sends it as `Authorization: Bearer …`; without it the route always returns 401).
+  `vercel.json` runs it daily at 04:00 UTC because the Hobby plan only allows daily crons; on Pro, use `*/15 * * * *`.
+  (Pending bookings already stop blocking dates after 30 minutes, so the daily run is cleanup, not correctness.)
+- Not handled automatically: disputes/chargebacks, refunds when the host's Stripe balance can't cover them (Stripe returns
+  an error; the guest is told to try again / contact the host), and a failed application-fee refund (logged as
+  `ACTION NEEDED`; refund the donation to the host by hand in the Stripe dashboard).
