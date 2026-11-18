@@ -1,4 +1,5 @@
 import { FLASH_COOKIE_NAME, getCurrentUser, isEmailVerified, readFlash } from "@/lib/auth";
+import { emailVerificationRequired } from "@/lib/email";
 import { ClearFlashCookie, ResendVerificationButton } from "@/app/verify-email/client";
 import { Icon } from "./Icons";
 
@@ -9,7 +10,7 @@ import { Icon } from "./Icons";
  */
 export async function VerifyEmailBanner() {
   const [user, flash] = await Promise.all([getCurrentUser(), readFlash()]);
-  const unverified = user && !isEmailVerified(user);
+  const unverified = user && !isEmailVerified(user) && emailVerificationRequired();
   if (!flash && !unverified) return null;
   return (
     <>

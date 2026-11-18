@@ -7,6 +7,7 @@ import { getCurrentUser, isEmailVerified } from "@/lib/auth";
 import { blockingBookingWhere, parseDay, todayUTC } from "@/lib/listings";
 import { calculatePrice, nightsBetween } from "@/lib/pricing";
 import { cancelAndRefund, startCheckout } from "@/lib/payments";
+import { emailVerificationRequired } from "@/lib/email";
 
 export type BookingState = { error?: string } | undefined;
 
@@ -16,7 +17,7 @@ export async function createBooking(_: BookingState, form: FormData): Promise<Bo
   const listingId = String(form.get("listingId") ?? "");
   const user = await getCurrentUser();
   if (!user) redirect(`/login?next=${encodeURIComponent(`/listings/${listingId}`)}`);
-  if (!isEmailVerified(user)) return { error: "Confirm your email before booking. We sent you a link; you can resend it from the banner at the top of the page." };
+  if (emailVerificationRequired() && !isEmailVerified(user)) return { error: "Confirm your email before booking. We sent you a link; you can resend it from the banner at the top of the page." };
 
   const checkIn = parseDay(String(form.get("checkIn")));
   const checkOut = parseDay(String(form.get("checkOut")));

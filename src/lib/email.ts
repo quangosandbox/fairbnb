@@ -61,3 +61,12 @@ export function layout(inner: string) {
 export function button(href: string, label: string) {
   return `<p style="margin:24px 0"><a href="${escapeHtml(href)}" style="background:#059669;color:#fff;text-decoration:none;padding:12px 20px;border-radius:8px;font-weight:600;display:inline-block">${escapeHtml(label)}</a></p>`;
 }
+
+/**
+ * Booking requires a confirmed email only when we can actually send one (RESEND_API_KEY set),
+ * or when REQUIRE_EMAIL_VERIFICATION=1 forces it (CI does this; emails go to EMAIL_OUTBOX_DIR).
+ * Without an email provider, requiring it would lock every new user out of booking.
+ */
+export function emailVerificationRequired(): boolean {
+  return emailMode() === "resend" || process.env.REQUIRE_EMAIL_VERIFICATION === "1";
+}

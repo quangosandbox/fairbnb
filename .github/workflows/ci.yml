@@ -16,6 +16,7 @@ env:
   NEXT_PUBLIC_APP_URL: http://localhost:3000
   NEXT_TELEMETRY_DISABLED: "1"
   EMAIL_OUTBOX_DIR: /tmp/outbox
+  REQUIRE_EMAIL_VERIFICATION: "1"
 
 jobs:
   checks:
